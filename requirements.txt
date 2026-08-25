@@ -1,0 +1,8 @@
+PyQt5
+pyvista
+pyvistaqt
+trimesh
+matplotlib
+scipy
+numpy
+scikit-learn
