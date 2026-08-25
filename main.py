@@ -215,6 +215,7 @@ class PotteryApp(QMainWindow):
         self.drawing_texture = False
         self.texture_lines = []
         self.current_texture_line = None
+        self.temp_texture_line = None
         self.canvas.mpl_connect('button_press_event', self.on_click_texture)
         self.canvas.mpl_connect('button_release_event', self.on_release_texture)
         self.canvas.mpl_connect('motion_notify_event', self.on_motion_texture)
@@ -336,36 +337,93 @@ class PotteryApp(QMainWindow):
         
     def redraw_profile(self):
         self.ax.clear()
-        if self.profile_2d is not None and len(self.profile_2d) > 0:
-            # The profile_2d has x >= 0. The user wants the filled profile on the left (-x),
-            # and the external boundary line on the right (+x).
+        if self.profile_2d is None or len(self.profile_2d) == 0:
+            self.canvas.draw()
+            return
             
-            # 1. Plot the left profile (internal and profile)
-            left_profile = self.profile_2d.copy()
-            left_profile[:, 0] = -left_profile[:, 0]
+        # 1. Left side: Fill the profile
+        left_profile = self.profile_2d.copy()
+        left_profile[:, 0] = -left_profile[:, 0]
+        
+        try:
+            from scipy.spatial import Delaunay
+            import matplotlib.tri as mtri
+            
+            triang = mtri.Triangulation(left_profile[:, 0], left_profile[:, 1])
+            x_tri = left_profile[triang.triangles, 0]
+            y_tri = left_profile[triang.triangles, 1]
+            
+            a = np.sqrt((x_tri[:,0]-x_tri[:,1])**2 + (y_tri[:,0]-y_tri[:,1])**2)
+            b = np.sqrt((x_tri[:,1]-x_tri[:,2])**2 + (y_tri[:,1]-y_tri[:,2])**2)
+            c = np.sqrt((x_tri[:,2]-x_tri[:,0])**2 + (y_tri[:,2]-y_tri[:,0])**2)
+            max_edge = np.max(np.column_stack((a, b, c)), axis=1)
+            
+            threshold = np.median(max_edge) * 3.0
+            valid_triangles = max_edge < threshold
+            triang.set_mask(~valid_triangles)
+            
+            self.ax.tripcolor(triang, facecolors=np.zeros(len(triang.triangles)), cmap='gray', vmin=0, vmax=1)
+            self.ax.triplot(triang, 'k-', lw=0.5)
+        except Exception as e:
             self.ax.plot(left_profile[:, 0], left_profile[:, 1], 'k.', markersize=2)
+
+        # 2. Right side: External Boundary Line
+        zmin, zmax = self.profile_2d[:, 1].min(), self.profile_2d[:, 1].max()
+        z_bins = np.linspace(zmin, zmax, 150)
+        ext_x = []
+        ext_z = []
+        for i in range(len(z_bins)-1):
+            mask = (self.profile_2d[:, 1] >= z_bins[i]) & (self.profile_2d[:, 1] < z_bins[i+1])
+            if np.any(mask):
+                ext_x.append(self.profile_2d[mask, 0].max())
+                ext_z.append((z_bins[i] + z_bins[i+1]) / 2)
+                
+        if len(ext_x) > 5:
+            from scipy.signal import savgol_filter
+            ext_x_smooth = savgol_filter(ext_x, window_length=min(11, len(ext_x)), polyorder=3)
+            self.ax.plot(ext_x_smooth, ext_z, 'k-', lw=2)
+        else:
+            self.ax.plot(ext_x, ext_z, 'k-', lw=2)
             
-            # 2. Plot the right profile (external line only)
-            # To get the external contour, we can take the maximum X for each Z bin,
-            # or simply plot the convex hull/boundary of the right side.
-            # A simple approach: sort by Z, then find max X for bins.
-            # But the easiest representation of just the external side is plotting the alpha shape.
-            # For a line drawing, we'll plot the points, but lighter, or we can extract the outer edge.
-            # Let's plot the right profile points as light gray so the user can see it,
-            # but we will extract the external line properly during 'save_image'.
-            self.ax.plot(self.profile_2d[:, 0], self.profile_2d[:, 1], '.', color='lightgray', markersize=1)
-            
-            # Draw center line
-            zmin, zmax = self.profile_2d[:, 1].min(), self.profile_2d[:, 1].max()
-            self.ax.plot([0, 0], [zmin, zmax], 'g-.', alpha=0.5)
-            
+        # Draw texture lines
         for line in self.texture_lines:
-            self.ax.plot([line[0][0], line[1][0]], [line[0][1], line[1][1]], 'b-')
+            self.ax.plot([line[0][0], line[1][0]], [line[0][1], line[1][1]], 'k-', lw=1.5)
             
+        # Draw center line
+        self.ax.plot([0, 0], [zmin, zmax], 'k-.', lw=1)
+        
+        # Draw rim line connecting the highest point on the left and right external line
+        if len(self.profile_2d) > 0 and len(ext_x) > 0:
+            peak_idx = np.argmax(self.profile_2d[:, 1])
+            left_peak_x = -self.profile_2d[peak_idx, 0]
+            peak_z = self.profile_2d[peak_idx, 1]
+            
+            if len(ext_x) > 5:
+                right_peak_x = ext_x_smooth[-1]
+            else:
+                right_peak_x = ext_x[-1]
+                
+            self.ax.plot([left_peak_x, right_peak_x], [peak_z, peak_z], 'k-', lw=1.2)
+        
+        # Scale bar (10cm = 100 units)
+        import matplotlib.patches as patches
+        bar_width = 100
+        bar_x = -bar_width / 2
+        bar_y = zmin - (zmax - zmin) * 0.1
+        bar_h = max((zmax - zmin) * 0.015, 1.0)
+        
+        for i in range(10):
+            color = 'k' if i % 2 == 0 else 'w'
+            rect = patches.Rectangle((bar_x + i*10, bar_y), 10, bar_h, facecolor=color, edgecolor='k', linewidth=1)
+            self.ax.add_patch(rect)
+            
+        self.ax.text(bar_x, bar_y - bar_h*1.5, "0", ha='center', fontsize=12)
+        self.ax.text(bar_x + 100, bar_y - bar_h*1.5, "10cm", ha='center', fontsize=12)
+        
         self.ax.set_aspect('equal')
+        self.ax.axis('off')
         self.ax.set_title(f"Profile at {self.slider_angle.value()} degrees")
-        self.ax.set_xlabel("Distance from center")
-        self.ax.set_ylabel("Z")
+        
         self.canvas.draw()
         
     def toggle_lasso(self):
@@ -383,12 +441,8 @@ class PotteryApp(QMainWindow):
     def on_lasso_select(self, verts):
         if self.profile_2d is None or len(self.profile_2d) == 0: return
         p = Path(verts)
-        # We need to map the lasso selection (which might be on the left side -x)
-        # to the right side (+x) where the profile_2d is stored.
-        # Check if selection is predominantly on the left side
         verts_arr = np.array(verts)
         if np.mean(verts_arr[:, 0]) < 0:
-            # selection was on the left side, mirror the path to right side
             verts_arr[:, 0] = -verts_arr[:, 0]
             p = Path(verts_arr)
             
@@ -410,22 +464,25 @@ class PotteryApp(QMainWindow):
     def on_click_texture(self, event):
         if not self.drawing_texture or event.inaxes != self.ax: return
         self.current_texture_line = [(event.xdata, event.ydata), (event.xdata, event.ydata)]
+        self.temp_texture_line, = self.ax.plot([event.xdata, event.xdata], [event.ydata, event.ydata], 'b--')
+        self.canvas.draw()
         
     def on_motion_texture(self, event):
         if not self.drawing_texture or self.current_texture_line is None or event.inaxes != self.ax: return
         self.current_texture_line[1] = (event.xdata, event.ydata)
-        
-        self.redraw_profile()
-        # draw temporary line
-        self.ax.plot([self.current_texture_line[0][0], self.current_texture_line[1][0]], 
-                     [self.current_texture_line[0][1], self.current_texture_line[1][1]], 'b--')
-        self.canvas.draw()
+        if self.temp_texture_line is not None:
+            self.temp_texture_line.set_data([self.current_texture_line[0][0], self.current_texture_line[1][0]], 
+                                            [self.current_texture_line[0][1], self.current_texture_line[1][1]])
+            self.canvas.draw()
         
     def on_release_texture(self, event):
         if not self.drawing_texture or self.current_texture_line is None or event.inaxes != self.ax: return
         self.current_texture_line[1] = (event.xdata, event.ydata)
         self.texture_lines.append(self.current_texture_line)
         self.current_texture_line = None
+        if self.temp_texture_line is not None:
+            self.temp_texture_line.remove()
+            self.temp_texture_line = None
         self.redraw_profile()
         
     def save_image(self):
@@ -433,103 +490,17 @@ class PotteryApp(QMainWindow):
         file_path, _ = QFileDialog.getSaveFileName(self, "Save Image", "pottery_scheme.png", "Images (*.png *.pdf)")
         if not file_path: return
         
-        self.ax.clear()
+        # Clear title for clean save
+        title = self.ax.get_title()
+        self.ax.set_title("") 
         
-        # 1. Left side: Fill the profile
-        left_profile = self.profile_2d.copy()
-        left_profile[:, 0] = -left_profile[:, 0]
-        
-        try:
-            from scipy.spatial import Delaunay
-            import matplotlib.tri as mtri
-            
-            # Create a nice tight mesh for filling using Delaunay
-            triang = mtri.Triangulation(left_profile[:, 0], left_profile[:, 1])
-            x_tri = left_profile[triang.triangles, 0]
-            y_tri = left_profile[triang.triangles, 1]
-            
-            a = np.sqrt((x_tri[:,0]-x_tri[:,1])**2 + (y_tri[:,0]-y_tri[:,1])**2)
-            b = np.sqrt((x_tri[:,1]-x_tri[:,2])**2 + (y_tri[:,1]-y_tri[:,2])**2)
-            c = np.sqrt((x_tri[:,2]-x_tri[:,0])**2 + (y_tri[:,2]-y_tri[:,0])**2)
-            max_edge = np.max(np.column_stack((a, b, c)), axis=1)
-            
-            # Dynamic threshold based on median edge length. 
-            threshold = np.median(max_edge) * 3.0
-            
-            valid_triangles = max_edge < threshold
-            triang.set_mask(~valid_triangles)
-            
-            # Fill the valid triangles with black
-            self.ax.tripcolor(triang, facecolors=np.zeros(len(triang.triangles)), cmap='gray', vmin=0, vmax=1)
-            
-            # Draw the edges of the valid triangles to provide a crisp outline without a convex hull
-            self.ax.triplot(triang, 'k-', lw=0.5)
-            
-
-        except Exception as e:
-            # Fallback if triangulation fails
-            self.ax.plot(left_profile[:, 0], left_profile[:, 1], 'k.', markersize=2)
-
-        # 2. Right side: External Boundary Line
-        # We find the maximum X for each Z interval
-        zmin, zmax = self.profile_2d[:, 1].min(), self.profile_2d[:, 1].max()
-        z_bins = np.linspace(zmin, zmax, 150)
-        ext_x = []
-        ext_z = []
-        for i in range(len(z_bins)-1):
-            mask = (self.profile_2d[:, 1] >= z_bins[i]) & (self.profile_2d[:, 1] < z_bins[i+1])
-            if np.any(mask):
-                ext_x.append(self.profile_2d[mask, 0].max())
-                ext_z.append((z_bins[i] + z_bins[i+1]) / 2)
-                
-        # Smooth the external line slightly
-        if len(ext_x) > 5:
-            from scipy.signal import savgol_filter
-            ext_x_smooth = savgol_filter(ext_x, window_length=min(11, len(ext_x)), polyorder=3)
-            self.ax.plot(ext_x_smooth, ext_z, 'k-', lw=2)
-        else:
-            self.ax.plot(ext_x, ext_z, 'k-', lw=2)
-            
-        # Draw texture lines
-        for line in self.texture_lines:
-            self.ax.plot([line[0][0], line[1][0]], [line[0][1], line[1][1]], 'k-', lw=1.5)
-            
-        # Draw center line
-        self.ax.plot([0, 0], [zmin, zmax], 'k-.', lw=1)
-        
-        # Draw rim horizontal line
-        top_pts = left_profile[left_profile[:, 1] >= zmax - 1.0]
-        if len(top_pts) > 0:
-            inner_x = np.max(top_pts[:, 0]) # closest to 0 since negative
-            self.ax.plot([inner_x, 0], [zmax, zmax], 'k-', lw=1.0)
-            
-        top_right_x = self.profile_2d[self.profile_2d[:, 1] >= zmax - 1.0, 0]
-        if len(top_right_x) > 0:
-            self.ax.plot([0, np.max(top_right_x)], [zmax, zmax], 'k-', lw=1.0)
-        
-        # Scale bar (10cm = 100 units, assuming units are mm)
-        # Black and white 1cm (10 unit) blocks
-        import matplotlib.patches as patches
-        bar_width = 100
-        bar_x = -bar_width / 2
-        bar_y = zmin - (zmax - zmin) * 0.1
-        bar_h = (zmax - zmin) * 0.015
-        
-        for i in range(10):
-            color = 'k' if i % 2 == 0 else 'w'
-            rect = patches.Rectangle((bar_x + i*10, bar_y), 10, bar_h, facecolor=color, edgecolor='k', linewidth=1)
-            self.ax.add_patch(rect)
-            
-        self.ax.text(bar_x, bar_y - bar_h*1.5, "0", ha='center', fontsize=12)
-        self.ax.text(bar_x + 100, bar_y - bar_h*1.5, "10cm", ha='center', fontsize=12)
-        
-        self.ax.set_aspect('equal')
-        self.ax.axis('off')
         self.fig.savefig(file_path, bbox_inches='tight', dpi=300)
-        self.canvas.draw()
-        QMessageBox.information(self, "Saved", f"Image saved to {file_path}")
         
-        self.redraw_profile()
+        # Restore title
+        self.ax.set_title(title)
+        self.canvas.draw()
+        
+        QMessageBox.information(self, "Saved", f"Image saved to {file_path}")
 
 if __name__ == '__main__':
     app = QApplication(sys.vars if hasattr(sys, 'vars') else sys.argv)

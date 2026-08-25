@@ -22,3 +22,4 @@ This is a PyQt5-based desktop application for 3D pottery sherd analysis. It load
 5. **No Placeholders**: When adding features, fully implement them.
 6. **Matplotlib Canvas**: Make sure to call `self.canvas.draw()` after updating `self.ax`.
 7. **Maintain Existing Workflows**: Do not break the Lasso tool, Texture Drawing, or the 3D picking workflows when modifying the UI or updating the 2D plot.
+8. **Live Preview Rendering**: `redraw_profile` is responsible for rendering the final output scheme (filled profiles, smoothed lines, scale bars, rim lines). `save_image` should simply save the matplotlib canvas to a file without recalculating the drawing.
