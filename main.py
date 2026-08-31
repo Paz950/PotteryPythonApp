@@ -341,33 +341,36 @@ class PotteryApp(QMainWindow):
             self.canvas.draw()
             return
             
-        # 1. Left side: Fill the profile
-        left_profile = self.profile_2d.copy()
-        left_profile[:, 0] = -left_profile[:, 0]
+        # 1. Right side: Fill the profile (Cross-section)
+        right_profile = self.profile_2d.copy()
         
         try:
             from scipy.spatial import Delaunay
             import matplotlib.tri as mtri
             
-            triang = mtri.Triangulation(left_profile[:, 0], left_profile[:, 1])
-            x_tri = left_profile[triang.triangles, 0]
-            y_tri = left_profile[triang.triangles, 1]
+            triang = mtri.Triangulation(right_profile[:, 0], right_profile[:, 1])
+            x_tri = right_profile[triang.triangles, 0]
+            y_tri = right_profile[triang.triangles, 1]
             
             a = np.sqrt((x_tri[:,0]-x_tri[:,1])**2 + (y_tri[:,0]-y_tri[:,1])**2)
             b = np.sqrt((x_tri[:,1]-x_tri[:,2])**2 + (y_tri[:,1]-y_tri[:,2])**2)
             c = np.sqrt((x_tri[:,2]-x_tri[:,0])**2 + (y_tri[:,2]-y_tri[:,0])**2)
             max_edge = np.max(np.column_stack((a, b, c)), axis=1)
             
-            threshold = np.median(max_edge) * 3.0
+            # Calculate a better threshold to preserve the vessel thickness 
+            # while removing large triangles across concavities.
+            # The previous threshold was too strict and removed the internal thickness triangles.
+            threshold = max(np.median(max_edge) * 20.0, 15.0)
             valid_triangles = max_edge < threshold
             triang.set_mask(~valid_triangles)
             
-            self.ax.tripcolor(triang, facecolors=np.zeros(len(triang.triangles)), cmap='gray', vmin=0, vmax=1)
+            # Pass C as a positional argument for vertex colors
+            self.ax.tripcolor(triang, np.zeros(len(right_profile[:, 0])), cmap='gray', vmin=0, vmax=1)
             self.ax.triplot(triang, 'k-', lw=0.5)
         except Exception as e:
-            self.ax.plot(left_profile[:, 0], left_profile[:, 1], 'k.', markersize=2)
+            self.ax.plot(right_profile[:, 0], right_profile[:, 1], 'k.', markersize=2)
 
-        # 2. Right side: External Boundary Line
+        # 2. Left side: External Boundary Line (Facade)
         zmin, zmax = self.profile_2d[:, 1].min(), self.profile_2d[:, 1].max()
         z_bins = np.linspace(zmin, zmax, 150)
         ext_x = []
@@ -375,7 +378,7 @@ class PotteryApp(QMainWindow):
         for i in range(len(z_bins)-1):
             mask = (self.profile_2d[:, 1] >= z_bins[i]) & (self.profile_2d[:, 1] < z_bins[i+1])
             if np.any(mask):
-                ext_x.append(self.profile_2d[mask, 0].max())
+                ext_x.append(-self.profile_2d[mask, 0].max())
                 ext_z.append((z_bins[i] + z_bins[i+1]) / 2)
                 
         if len(ext_x) > 5:
@@ -395,15 +398,24 @@ class PotteryApp(QMainWindow):
         # Draw rim line connecting the highest point on the left and right external line
         if len(self.profile_2d) > 0 and len(ext_x) > 0:
             peak_idx = np.argmax(self.profile_2d[:, 1])
-            left_peak_x = -self.profile_2d[peak_idx, 0]
+            right_peak_x = self.profile_2d[peak_idx, 0]
             peak_z = self.profile_2d[peak_idx, 1]
             
             if len(ext_x) > 5:
-                right_peak_x = ext_x_smooth[-1]
+                left_peak_x = ext_x_smooth[-1]
             else:
-                right_peak_x = ext_x[-1]
+                left_peak_x = ext_x[-1]
                 
             self.ax.plot([left_peak_x, right_peak_x], [peak_z, peak_z], 'k-', lw=1.2)
+            
+            # Display Rim Diameter
+            rim_diameter_units = right_peak_x - left_peak_x
+            rim_diameter_cm = rim_diameter_units / 10.0
+            
+            # Position the text on the top right
+            self.ax.text(right_peak_x, peak_z + (zmax - zmin) * 0.02, 
+                         f"Rim Diameter: {rim_diameter_cm:.1f} cm", 
+                         ha='right', va='bottom', fontsize=10, color='black')
         
         # Scale bar (10cm = 100 units)
         import matplotlib.patches as patches
@@ -421,6 +433,12 @@ class PotteryApp(QMainWindow):
         self.ax.text(bar_x + 100, bar_y - bar_h*1.5, "10cm", ha='center', fontsize=12)
         
         self.ax.set_aspect('equal')
+        
+        # Lock limits to prevent text from causing auto-scaling or squashing
+        max_abs_x = max(np.abs(right_profile[:, 0]).max(), np.abs(ext_x).max()) * 1.1
+        self.ax.set_xlim(-max_abs_x, max_abs_x)
+        self.ax.set_ylim(bar_y - bar_h*4.0, zmax + (zmax - zmin)*0.1)
+        
         self.ax.axis('off')
         self.ax.set_title(f"Profile at {self.slider_angle.value()} degrees")
         
