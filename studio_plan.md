@@ -1,0 +1,191 @@
+# Pottery Studio – Work Plan (new full-process GUI)
+
+> Living document. Update it whenever a decision changes or a stage is completed.
+
+## Status
+| Stage | Description | Status |
+|---|---|---|
+| 1 | Geometry functions in `pottery_processor.py` | **Done** (2026-09-28) – see §9 |
+| 2 | GUI skeleton: load, planes, alignment, 3D view | **Done** (2026-09-29) – tested by the user: "works perfect" |
+| 3 | Right-side 6-step pipeline, angle controls, Inspector & Grid tabs | **Done** (2026-09-29) – waiting for user test, see §11 |
+| 4 | Symmetry-axis modes & left side | **Done** (2026-09-29) – axis selector added in stage 3; left side done, waiting for user test, see §13 |
+| 5 | Handles: lasso, outline, mirror to left, handle section | Not started |
+| 6 | Scale bar, rim diameter, texture lines, save image | Not started |
+
+After each stage: stop and let the user test before continuing.
+
+---
+
+## 1. General approach
+- New files: `pottery_studio.py` (the GUI) and `RunStudio.bat` (launcher).
+- `main.py` and `profile_test2.py` are **not modified** and must keep working.
+- All math lives in `pottery_processor.py` (per `.agents/AGENTS.md`). The GUI file contains only UI, event handling and drawing.
+  - Move `run_6step_pipeline_v2` from `profile_test2.py` into `pottery_processor.py` (as a copy; `profile_test2.py` stays unchanged).
+  - New functions are **added**; existing functions keep their signatures so `main.py` is not broken.
+- Stack: PyQt5 + pyvista/pyvistaqt (3D) + matplotlib (2D scheme) + numpy/scipy/shapely/trimesh.
+- **No Save/Load settings** in this app (user decision). Every session starts from Load STL.
+
+## 2. User workflow (left control panel)
+1. **Load STL**
+2. **Vessel type** – radio buttons (only one selectable): `Sherd` / `Whole Vessel`.
+   - Checkbox **Symmetrical** (default: checked).
+   - Checkbox **Inner Wall Fully Scanned** (default: checked for Sherd, unchecked for Whole Vessel; reset when the type changes; user may override). Checked → scanned walls are used as they are; unchecked → the inner wall is completed (6-step pipeline).
+3. **Set Rim Plane** / **Set Base Plane** – each picks 3 points in the 3D view.
+   - The user must pick the 3 points **on the tip (edge) of the rim / base**, so that the circle through them gives a real center and diameter (`circle_from_3_points_3d`).
+   - A ✓ indicator shows which planes are set.
+4. **Alignment Plane** – radio buttons: `Rim` / `Base`.
+   - Default: Sherd → Rim, Whole Vessel → Base (changing the vessel type resets the default; user may override).
+   - An option that needs a plane which is not set is disabled.
+5. **Profile (right side)** – the full `profile_test2.py` procedure:
+   - Angle controls: ◀ -5° / ◀ -1° / angle spinbox / +1° ▶ / +5° ▶.
+   - Concave-hull ratio spinbox (default 0.03).
+   - **Symmetry axis** mode (see §3): `⟂ Rim` / `⟂ Base` / `Base-center → Rim-center`.
+     - Default: Sherd → ⟂ Rim, Whole Vessel → ⟂ Base. Modes needing a missing plane are disabled.
+   - ✂️ **Lasso Handle** / **Clear Handle**.
+   - **Lasso Clean Noise** (delete stray points, like `main.py`).
+   - **Add Handle to Left Side** – enabled only if Symmetrical and a handle is marked.
+   - **Draw Handle Section Line** – enabled when a handle is marked (see §5).
+6. **Add Texture Lines** – like `main.py` (click-drag straight lines on the scheme).
+7. **Save Scheme Image** – PNG/PDF, 300 dpi, saves the canvas as-is (no recalculation).
+
+### Tabs
+- **3D View** – pyvista, point picking, shows rim/base points, their circle centers and the symmetry axis.
+- **Scheme** – the final drawing (live preview).
+- **Step Inspector** – one pipeline step in a large view, with ◀ Previous / Next ▶ (as in `profile_test2`). The handle lasso works here.
+- **All Steps Grid** – all 6 steps side by side.
+- **Log** – diagnostics.
+
+## 3. Geometry: alignment plane vs. symmetry axis
+Two separate concepts:
+- **Alignment plane** → defines what is horizontal in the drawing (the chosen plane's normal = drawing "up").
+- **Symmetry axis** → a 3D line; the slice is taken around it and the left side is mirrored across it.
+
+Axis definitions (decided):
+| Mode | Direction | Passes through |
+|---|---|---|
+| ⟂ Rim | rim plane normal | rim circle center |
+| ⟂ Base | base plane normal | base circle center |
+| Base-center → Rim-center | from base center to rim center | both centers |
+
+Implementation outline:
+1. Rotate the cloud so the alignment-plane normal is +Z (`alignment_transform`). The up/down direction is chosen automatically (body above a base plane / below a rim plane), so no "Flip Upside Down" button is needed.
+2. Transform the rim/base points, centers and normals with the same rotation.
+3. Build the axis line in the aligned frame.
+4. **Slice around the axis**: the slicing half-plane contains the axis and is rotated by the profile angle around it (generalizes `extract_profile`, which assumes a vertical axis through `(xc, yc)`).
+5. Project the slice to 2D drawing coordinates: horizontal = distance within the slice plane, vertical = aligned Z. When the axis is not perpendicular to the alignment plane, it appears **tilted** in the drawing.
+6. Mirroring (symmetrical vessels) is a reflection across the 2D axis line, not `x → -x`.
+7. Rim line in the scheme: drawn along the actual rim plane (may be tilted), as in `main.py`'s `rim_z` logic.
+
+Implemented in `pottery_processor.py` (stage 1, section "Pottery Studio geometry"):
+- Coordinates: **uv** = inside the slicing plane, u = distance from the axis (right side u ≥ 0), v = along the axis. The axis is always u = 0, so the 6-step pipeline and mirroring (u → −u) work unchanged for a tilted axis. uv → **drawing** is a pure rotation (true shape kept; aligned +Z is up).
+- `rotation_between`, `alignment_transform(p1,p2,p3, points, plane)`, `apply_alignment` – alignment with automatic up/down.
+- `circle_through_3_points` – rim/base circle (center, radius, normal). **Use this, not `circle_from_3_points_3d`** (see §9).
+- `build_symmetry_axis(mode, rim_circle, base_circle)` – modes `'rim'`, `'base'`, `'centers'`.
+- `slice_frame(axis_point, axis_dir, angle_deg)` – for a vertical axis identical to `extract_profile`.
+- `points_to_uv`, `uv_to_3d`, `uv_to_drawing`, `drawing_to_uv`, `geometry_uv_to_drawing`, `mirror_uv`, `reflect_across_line_2d`.
+- `extract_axis_profile` (right-side slice), `extract_axis_half` (projection of one half).
+- `outline_polygon` (concave hull, 1 mm downsampling, holes allowed), `points_in_polygon` (lasso mask).
+- `circle_slice_intersections` – where the rim circle crosses the slicing plane → the (possibly tilted) rim line.
+- `handle_section(points, frame, lasso_uv, line_uv)` + `filled_section_polygon` – filled, smoothed section from the user-drawn line.
+- `run_6step_pipeline` – copy of `run_6step_pipeline_v2`; also ignores a handle mask of the wrong length instead of crashing.
+
+## 4. Right side – profile
+- **Changed 2026-09-29 (user):** inner-wall completion is controlled by the **Inner Wall Fully Scanned** checkbox (default on for Sherd, off for Whole Vessel). On → `run_6step_pipeline(..., complete_inner_wall=False)`: Steps 1–2 only, the concave hull of the slice is the section (Steps 3–5 shown as "not used – inner wall scanned"). Off → full 6 steps with the synthetic inner wall.
+  - Pipeline facts (from `run_6step_pipeline_v2`): Step 3 searches the **bottom center in the lowest 15%** of the profile (to split outer/inner walls); Step 4 measures thickness from inner-wall points in the **top 20 mm below the rim**; Step 6 closes the base with a floor to the axis.
+  - Risk to verify on real sherds (no base): Step 5 replaces the scanned inner wall with a synthetic offset, and Step 6 draws a floor to the axis that a sherd doesn't have. Check during Stage 3 and report; possible fallback: skip Step 6 floor closure for sherds.
+- Axis-spill filter of Step 1 (`x < 0.8` above `z_min + 30`) must be expressed relative to the (possibly tilted) axis.
+- **Handle lasso (5a)**:
+  - Store the **lasso polygon** (vertices), not a per-point boolean mask. Recompute the mask on every slice. This avoids the `profile_test2` crash when the angle changes after a lasso.
+  - Lassoed points are removed from the profile pipeline.
+  - The handle is drawn in **external-view style** (outline, not filled): take the 3D points of the right half whose 2D projection falls inside the lasso polygon, build a `concave_hull` (1 mm downsampling, holes allowed for the handle opening) and draw its outline.
+
+## 5. Left side, handles, labels
+- **5b – Left side**
+  - Symmetrical: mirror of the right side's **outer outline** across the axis line.
+  - Not symmetrical: real projection of the other half of the cloud (as `main.py`'s facade, with clipping at the axis and rim line).
+- **5c – Add Handle to Left Side**: reflect the handle outline across the axis and draw it on the left side.
+- **5e – Labels**
+  - 10 cm scale bar (alternating black/white, as `main.py`).
+  - Rim diameter text – only when the rim plane was set with 3 points.
+  - **Handle section** (only when a handle is lassoed):
+    - Cut **perpendicular to the direction the handle runs** (user decision).
+    - The **user draws the section line** across the handle on the scheme (button **Draw Handle Section Line**, click-drag like texture lines). This replaces automatic centerline detection – simpler and more accurate (user decision).
+    - Method: the drawn 2D line + the viewing direction (perpendicular to the drawing plane) define a 3D cutting plane. Take the handle's 3D points within a thin slab (±1–2 mm) of that plane, project them onto the plane, and build a filled `concave_hull`.
+    - Draw it filled black **above the handle**, with a dashed leader line to the section line.
+    - Only **one** handle section, for the handle on the **right side** of the scheme. Redrawing the line replaces the previous section.
+- **6 – Texture lines** and **7 – Save** as in `main.py`.
+
+## 6. Test data
+Folder: `C:\Users\lenovo\Desktop\AmitDagan\models\` – the user approved loading these two STL files from there for testing (use only the files the user names):
+- **Whole vessel with handle:** `bilbil23.stl` (35 MB).
+- **Sherd without handle:** `ImageToStl.com_lmlk+sj (1).stl` (24.5 MB).
+
+## 7. Error handling & conventions
+- Follow `.agents/AGENTS.md`: try/except around picking and heavy math, errors via `QMessageBox`, light-green stylesheet, `canvas.draw()` after updates, no placeholders.
+
+## 8. Decisions log
+| # | Question | Decision |
+|---|---|---|
+| 1 | Sherd profile method | ~~6-step pipeline~~ → **changed 2026-09-29**: "Inner Wall Fully Scanned" checkbox – default on for Sherd (scanned walls, Steps 1–2 only), off for Whole Vessel (inner wall completed); user can override |
+| 2 | Axis anchor points | ⟂ Rim through rim center, ⟂ Base through base center; user picks 3 points on the tip of the rim/base |
+| 3 | Only one plane set | Disable options that need the missing plane |
+| 4 | Handle section orientation | Perpendicular to the direction the handle runs; the user draws the section line across the handle |
+| 4b | Number of handle sections | One only, for the handle on the right side of the scheme |
+| 7 | Test files | `bilbil23.stl` (whole vessel + handle), `ImageToStl.com_lmlk+sj (1).stl` (sherd, no handle) |
+| 8 | Fix old `circle_from_3_points_3d` | Yes – fixed 2026-09-29 |
+| 9 | Default axis for Whole Vessel | Stays ⟂ Base, even when the neck is off-axis; user switches to `centers` manually |
+| 10 | Handle seen side-on | User's responsibility to choose the angle |
+| 11 | Button labels & controls | Exactly as specified in §2 (e.g. "Load STL", "Set Rim Plane", "Set Base Plane", radio buttons, "Add Texture Lines", "Save Scheme Image") – **not** the numbered labels of the old GUIs ("1. Load STL", "2. Align (Pick 3 Points on Base/Rim)", ...) |
+
+## 9. Findings from stage 1 (2026-09-28)
+- **Bug in the existing `circle_from_3_points_3d`**: its center was not equidistant from the 3 points (radius was only correct to the first point). This affected `main.py` ("Pick 3 Points on Rim") and `profile_test2.py` (rim center → slicing center and diameter). **Fixed on 2026-09-29** with the user's approval; it now gives the same result as `circle_through_3_points`.
+- **Tests**: synthetic tests (random pose, tilted rim 15°, torus handle) all pass – alignment, auto up/down, axis modes, uv/drawing round-trip, mirror = reflection across tilted axis, rim line ⟂ axis, handle section of a 16 mm tube = 16 × 16 mm.
+- **bilbil23.stl** (simulated 3-point picks on rim/base tips): rim Ø 8.0 cm, base Ø 5.7 cm, rim plane tilted 12.7° from base plane. Rim & centers axis modes give a clean profile (thickness 3.4–4.1 mm); pipeline < 1 s per slice.
+  - With the ⟂ Base axis the neck is far off the axis, so the slice misses the neck. (Correction, stage 2: the simulated base clicks were not on the tip of the foot – the base circle was ~4 cm off-center – so the "~85 mm" offset was exaggerated by the test. Re-check with real clicks.) For this bilbil the user chooses the `centers` mode manually; the **default stays ⟂ Base for Whole Vessel** (user decision).
+- **Handle section (stage 1 note)**: correct only when the profile angle shows the handle side-on (handle in the drawing plane); the lasso must enclose the whole handle, otherwise the section is partial. This is the user's responsibility (user decision) – show a short hint next to the Draw Handle Section Line button.
+| 5 | Save/Load settings | Not included |
+| 6 | Noise-cleaning lasso | Included |
+
+## 10. Stage 2 notes (2026-09-29)
+- Files: `pottery_studio.py` (class `PotteryStudio`), `RunStudio.bat` (optional argument: an STL path to load at start).
+- Left panel: **Load STL** · **Vessel Type** (radio Sherd / Whole Vessel + **Symmetrical** checkbox) · **Planes** (**Set Rim Plane** / **Set Base Plane**, each shows ✓ and Ø when set; while picking the button reads "Cancel … Picking") · **Alignment Plane** (radio Rim / Base + height and rim↔base tilt).
+- Tabs: **3D View** (shaded mesh; rim = red points/circle/center, base = blue) and **Log**.
+- Picked points are stored in raw STL coordinates, so re-picking after alignment and switching the alignment plane both work.
+- Alignment radio: default by vessel type; the user's choice is kept until the vessel type changes; a plane that is not set is disabled; if the preferred plane is missing, the other set plane is used.
+- Collinear picks are rejected with a message. Loading a new STL resets the planes.
+- Display: the user's screen is 4K with 250% text scaling (logical DPI 240, device pixel ratio 1). Sizes must be derived from the screen/font (window = 80% of the screen, panel width from its content, tab padding in `em`), never fixed pixels.
+- Tested by driving the window from a script (simulated clicks through the picking callback). Real mouse clicking in the 3D view still needs the user's test.
+
+## 11. Stage 3 notes (2026-09-29)
+- Left panel: new **Profile** group – Angle spinbox (0–359°, wraps) + ◀ -5° / ◀ -1° / +1° ▶ / +5° ▶, Hull Ratio (default 0.03), status (axis, slice points, wall thickness or the pipeline error).
+- Tabs: 3D View · **Scheme** · **Step Inspector** · **All Steps Grid** · Log.
+  - 3D View shows the symmetry axis (black line) and the right-side slicing half-plane (translucent green); it follows the angle.
+  - Scheme (drawing coordinates, alignment plane horizontal): filled profile, dash-dot axis up to the rim line, rim line from the axis to the right rim point (possibly tilted).
+  - Step Inspector / Grid show the 6 steps in uv coordinates (axis vertical at u = 0).
+- Axis: until stage 4 adds the selector, the default by vessel type is used (Sherd → ⟂ Rim, Whole → ⟂ Base; the other plane if the preferred one is missing).
+- Performance: ~0.5 s per angle on bilbil23 (367k vertices). Angle/ratio changes are debounced (120 ms) so fast clicking computes once; only the visible 2D tab is redrawn.
+- Chart DPI follows the screen text scaling (logical DPI × 0.9) so chart text is readable on the 4K/250% screen.
+- **bilbil23 results** (accurate simulated base picks on the foot's resting ring – base Ø 8.4 cm; the neck leans ~6°, rim center 29 mm off the ⟂ Base axis):
+  - ⟂ Base axis: at many angles both neck walls fall on the right side of the axis → the pipeline takes the far neck wall as the "inner wall" → wrong thickness (2.6–48.8 mm). Expected for this vessel; the user will use the `centers` axis (stage 4 selector).
+  - `centers` axis: clean profile at every angle, thickness 3.5–4.8 mm.
+  - The pipeline's base closure draws the ring foot with a small fork (inherited from `run_6step_pipeline_v2`). Revisit if the user wants.
+- **Sherd (`ImageToStl.com_lmlk+sj (1).stl`)**: could not simulate reliable rim clicks – the long flat top edge is almost straight (probably a break), and 3 points on a short rim arc give an unstable plane/diameter (e.g. 55 cm and a 35° tilt from points 4 cm apart). **Needs the user's test with real clicks.** Possible improvement to discuss: fit the rim plane/circle from many rim points instead of exactly 3.
+
+- **Stage 3 follow-up (2026-09-29):** added the **Symmetry Axis** group (radio: Perpendicular to Rim / Perpendicular to Base / Base Center → Rim Center; default by vessel type, reset when the type changes; modes needing a missing plane are disabled). The Log now records the 3 clicked points of each plane in STL coordinates, so a user's setup can be reproduced. If the slice misses a sherd at the current angle, the status says to rotate the angle.
+- The simulated sherd rim clicks were placed on the wrong edge (user: "you placed the points wrong way"). Use the user's real clicks from the Log for sherd tests.
+
+## 12. Step 4 thickness fix (2026-09-29, found by the user on `jug80223.stl`)
+- Problem: the jug's thickness came out 0.2–0.6 mm at most angles although Step 3 split the walls correctly. Two causes in the original Step 4 (median distance of inner-wall hull vertices in the top 20 mm to the outer wall):
+  1. Hull vertices crowd on the rounded lip, where inner and outer walls meet (distance ~0) → median pulled to ~0.
+  2. The jug's narrow neck is scanned inside only ~5–10 mm below the rim; below that the hull's "inner" side runs along the outer wall (distance ~0).
+- Fix in `run_6step_pipeline` (Studio copy only; `profile_test2.py` unchanged): resample the inner wall every 0.5 mm; use samples 1.5–20 mm below the rim peak; ignore samples < 1 mm from the outer wall (not a real inner wall); fall back to all samples if fewer than 3 remain.
+- Results (12 angles): jug80223 (⟂ Rim) 3.2–4.7 mm (was 0.2–4.6); bilbil23 (centers) 3.5–5.2 mm (unchanged); synthetic 6 mm wall 5.4 mm (unchanged).
+- Note: jug80223 is scanned upside down (rim at the bottom) and has a rounded base – no base ring to click, so it uses the rim plane only.
+
+## 13. Stage 4 notes – left side (2026-09-29)
+- **Symmetrical** (checkbox on): left side = mirror (u → −u, i.e. across the possibly tilted axis) of the right profile's **outer wall** – `diag['outer_coords']` for a completed profile, else `outer_wall_coords(polygon)` (outline between lowest and highest point, the side farther from the axis). Drawn as an outline (not filled).
+- **Not symmetrical**: left side = `half_view_outline(...)` – concave hull (ratio 0.1, 1 mm grid, holes kept) of the real left half's projection (u ≤ 0), clipped at the axis and below the rim line. Computed per angle (~0.7 s on bilbil23, 0.1 s on jug80223); toggling the checkbox recomputes only the left side.
+- **Rim line** across both sides: right end = rim circle ∩ slicing plane (or the profile's top point without a rim plane); left end = mirror of the right end (symmetrical) or the real crossing (not symmetrical).
+- Axis (dash-dot) from the lowest drawn point up to the rim line.
+- Tested: bilbil23 (Whole, centers axis, tilted in the drawing) – mirror follows the tilted axis; non-symmetrical view shows the real handle with its opening. jug80223 (Whole, ⟂ Rim) – both modes OK.
+- Possible polish (not done): the non-symmetrical outline is slightly faceted on small vessels (1 mm grid) – could be smoothed.

@@ -6,3 +6,4 @@ matplotlib
 scipy
 numpy
 scikit-learn
+shapely
