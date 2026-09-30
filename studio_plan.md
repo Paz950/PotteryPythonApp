@@ -9,8 +9,8 @@
 | 2 | GUI skeleton: load, planes, alignment, 3D view | **Done** (2026-09-29) – tested by the user: "works perfect" |
 | 3 | Right-side 6-step pipeline, angle controls, Inspector & Grid tabs | **Done** (2026-09-29) – waiting for user test, see §11 |
 | 4 | Symmetry-axis modes & left side | **Done** (2026-09-29) – axis selector added in stage 3; left side done, waiting for user test, see §13 |
-| 5 | Handles: lasso, outline, mirror to left, handle section | Not started |
-| 6 | Scale bar, rim diameter, texture lines, save image | Not started |
+| 5 | Handles: lasso, outline, mirror to left, handle section | **Done** (2026-09-29) – waiting for user test, see §14 |
+| 6 | Scale bar, rim diameter, texture lines, save image | **Done** (2026-09-30) – waiting for user test, see §18 |
 
 After each stage: stop and let the user test before continuing.
 
@@ -135,6 +135,13 @@ Folder: `C:\Users\lenovo\Desktop\AmitDagan\models\` – the user approved loadin
 | 8 | Fix old `circle_from_3_points_3d` | Yes – fixed 2026-09-29 |
 | 9 | Default axis for Whole Vessel | Stays ⟂ Base, even when the neck is off-axis; user switches to `centers` manually |
 | 10 | Handle seen side-on | User's responsibility to choose the angle |
+| 12 | Missing wall under a removed handle | ~~Draw Wall Line~~ (built, then **removed** 2026-09-29 at the user's request) → **two angles**: the handle is lassoed at its own angle; the section is taken at the nearest angle without the handle (all real scan data, no completion); the handle is drawn rotated onto it |
+| 13 | Collapsible groups | **No folding** (user, 2026-09-30): the panel looks fine as it is |
+| 14 | One or two angles for the handle | User chooses with the checkbox **"Section at a Nearby Angle (without the handle)"** in the Handle group – **default off = one angle** (2026-09-30) |
+| 15 | Scale bar | Always 10 cm (user, 2026-09-30) |
+| 16 | Texture lines | Straight lines only, with **Undo Last Line** |
+| 17 | Text in the scheme | Only the rim diameter |
+| 18 | Saved file name | STL file name + `_scheme` (e.g. `bilbil23_scheme.png`), default folder = the STL's folder |
 | 11 | Button labels & controls | Exactly as specified in §2 (e.g. "Load STL", "Set Rim Plane", "Set Base Plane", radio buttons, "Add Texture Lines", "Save Scheme Image") – **not** the numbered labels of the old GUIs ("1. Load STL", "2. Align (Pick 3 Points on Base/Rim)", ...) |
 
 ## 9. Findings from stage 1 (2026-09-28)
@@ -189,3 +196,46 @@ Folder: `C:\Users\lenovo\Desktop\AmitDagan\models\` – the user approved loadin
 - Axis (dash-dot) from the lowest drawn point up to the rim line.
 - Tested: bilbil23 (Whole, centers axis, tilted in the drawing) – mirror follows the tilted axis; non-symmetrical view shows the real handle with its opening. jug80223 (Whole, ⟂ Rim) – both modes OK.
 - Possible polish (not done): the non-symmetrical outline is slightly faceted on small vessels (1 mm grid) – could be smoothed.
+
+## 14. Stage 5 notes – handle & noise (2026-09-29)
+> The handle part below (one angle, handle masked out of the slice) is **superseded by §16** (two angles). Noise cleaning is unchanged.
+- Left panel: **Handle** group (hint "Rotate the angle until the handle is seen side-on, then lasso it." · **Lasso Handle** · **Clear Handle** · **Add Handle to Left Side** (toggle; reads "Remove Handle from Left Side" when on; enabled only if Symmetrical and a handle is marked) · **Draw Handle Section Line** (enabled when a handle is marked) · status with the section size). **Clean Noise** group (**Lasso Clean Noise** · **Restore Removed Points (n)**).
+- The lassos work on the **Scheme** (drawing coordinates) and the **Step Inspector** (uv); both are converted to uv. Lassos are re-attached after every redraw (`ax.clear()` detaches them).
+- Handle: the lasso polygon is stored in uv (not a point mask) → the pipeline's handle mask is recomputed for every slice; small angle changes keep the handle. Changing the planes, the alignment, the vessel type or the symmetry axis clears the handle (logged), since uv would no longer match.
+  - External view: `handle_outline()` = concave hull (holes kept) of right-half points inside the lasso, drawn as an outline **before** the filled section so the section covers the handle roots.
+  - Left copy: mirror (u → −u) of the handle outline.
+  - Section line: click-drag on the Scheme → uv → `handle_section()`; filled black, drawn **above the handle** (top of the handle outline + gap), with t along the drawn line and s perpendicular; dashed leader to the line's midpoint; a short cut mark on the handle. Only one section; drawing again replaces it. If the line misses the handle, the status says so and the line is shown faintly in red.
+- Noise: removes points in the lasso – right side within the 2 mm profile slab; left side (non-symmetrical only) the whole left half's projection. Stored as a keep-mask over the vertices (survives angle/axis/alignment changes; reset on Load STL).
+- Tested on bilbil23 (Whole Vessel, centers axis, angle 98° = handle side-on): handle lasso → 5,170 slice points excluded from the profile, wall thickness unchanged (4.5 mm), neck wall continues behind the handle; section 8.2 × 19.0 mm (strap handle); +2° keeps the handle (7.7 × 19.2 mm); noise lasso 711 points removed and restored; axis change clears the handle.
+
+## 15. Complete Wall – drawn wall lines (REMOVED 2026-09-29)
+- Built for jug80223 (broken handle stump covering the outer wall), then **removed completely at the user's request** (GUI group, `wall_line_points()` and all related code): drawing the outer wall to evaluate the wall where a handle sits was not accurate enough. Replaced by the two-angle handle procedure (§16).
+
+## 16. Two-angle handle procedure (2026-09-29, replaces §15; user's idea)
+- **Handle angle:** the user sets the angle where the handle is seen side-on and lassos it (Scheme or Step Inspector → Step 1). The handle's 3D points = right-half points inside the lasso (`handle_mask3d`), its outline is computed once at that angle.
+- **Section angle:** right after the lasso the Angle moves automatically to the nearest angle whose 2 mm slice misses the handle: `handle_free_angle()` = the handle's angular extent around the axis (each point widened by the slab half-width at its radius) + 5° margin, on the closer side. The user may adjust it (hint: keep it close to the handle).
+- **Section:** built from all points **except the handle's** (`active_points(exclude_handle=True)`) → the whole cross-section and its thickness are real scan data at the section angle; nothing is completed or drawn by hand.
+- **Handle drawing:** both slicing frames rotate around the same axis, so the handle's uv at its own angle is exactly the handle rotated onto the section plane → the stored outline is drawn with the current frame. The section line is drawn on the Scheme at the section angle and converted to the shared uv; `handle_section()` uses the handle frame. Add Handle to Left Side mirrors the same outline.
+- **Status** (Handle group): "Handle at 82° · section at 106° (+24°)"; warns "The section cuts through the handle – move the Angle a little further…" when > 20 handle points are within the slice; section size.
+- A new lasso replaces the handle (the old one is cleared first). Clear Handle keeps the current angle. Planes/alignment/type/axis changes clear the handle (logged).
+- Step Inspector Step 1 shows the handle outline in red ("Handle (from 82°)") – it is not part of the slice.
+- Tested: jug80223 (⟂ Rim) stump at 82° → section 106°, thickness 3.0 mm (was 1.1 mm with the stump removed at 82°), full wall from the rim; warning at 84°. bilbil23 (centers) handle at 98° → section 77°, thickness 4.9 mm, handle section 8.2 × 19.0 mm (same as before), left copy OK; +3° keeps everything.
+- Known, accepted: on a hand-made vessel the rotated handle's roots may miss the section wall by ~1 mm (jug stump); where the lasso cut the handle root the outline has a straight edge.
+
+## 17. One / two angles – user's choice (2026-09-30)
+- Handle group: checkbox **Section at a Nearby Angle (without the handle)**, **unchecked by default**.
+  - **Off (one angle, default):** after the lasso the Angle stays at the handle angle; the section is built from that slice without the handle's points (same result as the original stage-5 method). Status: "Handle and section at 82°". No "cuts through the handle" warning (the section is at the handle on purpose).
+  - **On (two angles, §16):** after the lasso the Angle moves to the nearest angle without the handle (`handle_free_angle`).
+  - Toggling after a lasso moves the Angle between the handle angle and that nearest free angle; the handle (lasso, section line, left copy) is kept.
+- The nearest free angle is computed at lasso time (`handle_free`) and reset with the handle.
+- Tested on jug80223: lasso at 82° → stays 82° (thickness 1.1 mm, wall missing under the stump) → checkbox on → 106° (3.0 mm) → off → back to 82°. bilbil23 with the checkbox on → 77°, section 8.2 × 19.0 mm.
+
+## 18. Stage 6 notes – finishing the scheme (2026-09-30)
+- Left panel: **Finish Scheme** group – **Add Texture Lines** (toggle; click-drag straight lines on the Scheme, as many as needed, click the button again to stop), **Undo Last Line**, **Save Scheme Image**.
+- Texture lines are stored in uv (they stay on the vessel if the drawing's tilt changes); kept on angle changes; cleared (logged) when the planes/alignment/type/axis change and on Load STL; not cleared by Clear Handle.
+- **Rim diameter**: "Rim Diameter: X cm" above the right end of the rim line, only when the rim plane is set (3 points).
+- **Scale bar**: 10 cm, alternating black/white centimetres, under the vessel, centred on the bottom of the axis, labels "0" and "10 cm".
+- The scheme's limits include the labels (text is not part of matplotlib's automatic limits).
+- **Save Scheme Image**: dialog with default `<STL name>_scheme.png` in the STL's folder; PNG or PDF (extension added from the chosen filter if typed without one); 300 dpi, `bbox_inches='tight'`, white background; saves the scheme as drawn, without helper markings (faint red invalid section line, handle lasso preview); any active drawing tool is switched off first.
+- Tested on bilbil23 (Whole, centers axis, two angles, handle + section + left copy, 3 texture lines → undo → 2): PNG 823 × 1648 px at 300 dpi and PDF saved; default name `bilbil23_scheme.png` in the models folder; scale bar consistent with the vessel height (27.9 cm ≈ 2.8 bar lengths).
+- Note: the saved image is not at a fixed print scale (e.g. 1:1); the scale bar gives the scale. A fixed-scale export could be added if needed.

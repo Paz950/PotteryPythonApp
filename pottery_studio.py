@@ -16,6 +16,8 @@ import pyvista as pv
 from pyvistaqt import QtInteractor
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas, NavigationToolbar2QT
 from matplotlib.figure import Figure
+from matplotlib.widgets import LassoSelector
+import matplotlib.patches as patches
 from shapely.geometry import Point, LineString
 
 import pottery_processor
@@ -80,6 +82,24 @@ class PotteryStudio(QMainWindow):
         self.diag = {}
         self.left_lines_uv = []       # left external view for non-symmetrical vessels (uv lines)
         self.dirty_views = set()      # tabs that need redrawing when shown
+
+        # Handle (right side) and noise cleaning
+        self.keep_mask = None         # bool per vertex; False = removed by "Lasso Clean Noise"
+        self.handle_lasso_uv = None   # lasso polygon around the handle (uv of the handle angle)
+        self.handle_outline_uv = None # external-view outline of the handle (uv Polygon)
+        self.handle_angle = None      # profile angle at which the handle was lassoed (seen side-on)
+        self.handle_frame = None      # slicing frame at the handle angle
+        self.handle_mask3d = None     # bool per vertex: the handle's points (kept out of the section)
+        self.handle_free = None       # nearest angle whose slice misses the handle
+        self.handle_on_left = False   # "Add Handle to Left Side"
+        self.section_line_uv = None   # section line drawn across the handle (uv, 2 points)
+        self.handle_sec = None        # result of pottery_processor.handle_section
+        self.interaction = None       # 'handle' / 'noise' / 'section' while the user draws
+        self.selectors = {}           # active LassoSelectors per canvas
+        self._line_start = None       # section / texture line being drawn (drawing coordinates)
+        self._temp_line = None
+        self.texture_lines_uv = []    # straight texture/decoration lines (uv, 2 points each)
+        self._exporting = False       # True while saving: helper markings are not drawn
 
         # Recompute the profile shortly after the last angle/ratio change (keeps the spinbox responsive)
         self.profile_timer = QTimer(self)
@@ -353,6 +373,70 @@ class PotteryStudio(QMainWindow):
         profile_layout.addWidget(self.lbl_profile)
         panel.addWidget(self.grp_profile)
 
+        # Handle
+        self.grp_handle = QGroupBox("Handle")
+        handle_layout = QVBoxLayout(self.grp_handle)
+        hint = QLabel("Rotate the angle until the handle is seen side-on, then lasso it. With \"Section at a "
+                      "Nearby Angle\" the section moves to the nearest angle without the handle – you can "
+                      "adjust it, but keep it close to the handle.")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        handle_layout.addWidget(hint)
+        # Off (default): the section stays at the handle angle, without the handle's points.
+        # On: the section moves to the nearest angle without the handle (two angles).
+        self.chk_two_angles = QCheckBox("Section at a Nearby Angle (without the handle)")
+        self.chk_two_angles.setChecked(False)
+        self.chk_two_angles.toggled.connect(self.on_two_angles_changed)
+        handle_layout.addWidget(self.chk_two_angles)
+        self.btn_lasso_handle = QPushButton("Lasso Handle")
+        self.btn_lasso_handle.setCheckable(True)
+        self.btn_lasso_handle.clicked.connect(lambda: self.set_interaction('handle'))
+        handle_layout.addWidget(self.btn_lasso_handle)
+        self.btn_clear_handle = QPushButton("Clear Handle")
+        self.btn_clear_handle.clicked.connect(self.clear_handle)
+        handle_layout.addWidget(self.btn_clear_handle)
+        self.btn_handle_left = QPushButton("Add Handle to Left Side")
+        self.btn_handle_left.setCheckable(True)
+        self.btn_handle_left.clicked.connect(self.toggle_handle_left)
+        handle_layout.addWidget(self.btn_handle_left)
+        self.btn_section = QPushButton("Draw Handle Section Line")
+        self.btn_section.setCheckable(True)
+        self.btn_section.clicked.connect(lambda: self.set_interaction('section'))
+        handle_layout.addWidget(self.btn_section)
+        self.lbl_handle = QLabel("")
+        self.lbl_handle.setObjectName("status")
+        self.lbl_handle.setWordWrap(True)
+        handle_layout.addWidget(self.lbl_handle)
+        panel.addWidget(self.grp_handle)
+
+
+        # Clean noise
+        self.grp_noise = QGroupBox("Clean Noise")
+        noise_layout = QVBoxLayout(self.grp_noise)
+        self.btn_lasso_noise = QPushButton("Lasso Clean Noise")
+        self.btn_lasso_noise.setCheckable(True)
+        self.btn_lasso_noise.clicked.connect(lambda: self.set_interaction('noise'))
+        noise_layout.addWidget(self.btn_lasso_noise)
+        self.btn_restore = QPushButton("Restore Removed Points")
+        self.btn_restore.clicked.connect(self.restore_points)
+        noise_layout.addWidget(self.btn_restore)
+        panel.addWidget(self.grp_noise)
+
+        # Finish: texture lines and saving the scheme
+        self.grp_finish = QGroupBox("Finish Scheme")
+        finish_layout = QVBoxLayout(self.grp_finish)
+        self.btn_texture = QPushButton("Add Texture Lines")
+        self.btn_texture.setCheckable(True)
+        self.btn_texture.clicked.connect(lambda: self.set_interaction('texture'))
+        finish_layout.addWidget(self.btn_texture)
+        self.btn_undo_texture = QPushButton("Undo Last Line")
+        self.btn_undo_texture.clicked.connect(self.undo_texture_line)
+        finish_layout.addWidget(self.btn_undo_texture)
+        self.btn_save = QPushButton("Save Scheme Image")
+        self.btn_save.clicked.connect(self.save_scheme_image)
+        finish_layout.addWidget(self.btn_save)
+        panel.addWidget(self.grp_finish)
+
         panel.addStretch()
 
         scroll = QScrollArea()
@@ -412,6 +496,10 @@ class PotteryStudio(QMainWindow):
         self.tabs.addTab(tab, "All Steps Grid")
 
         self.tabs.currentChanged.connect(self._render_dirty_views)
+        # Drawing the handle section line on the scheme
+        self.canvas_scheme.mpl_connect('button_press_event', self.on_scheme_press)
+        self.canvas_scheme.mpl_connect('motion_notify_event', self.on_scheme_motion)
+        self.canvas_scheme.mpl_connect('button_release_event', self.on_scheme_release)
 
         self.txt_log = QTextEdit()
         self.txt_log.setReadOnly(True)
@@ -493,6 +581,9 @@ class PotteryStudio(QMainWindow):
         self.stl_file_path = file_path
         self.rim_points_raw = None
         self.base_points_raw = None
+        self.keep_mask = np.ones(len(self.points_raw), dtype=bool)
+        self._reset_handle()
+        self._reset_texture()
         self.alignment_choice = None
         self.lbl_file.setText(os.path.basename(file_path))
         self.log(f"Loaded {file_path}: {len(self.points_raw):,} vertices, "
@@ -516,6 +607,7 @@ class PotteryStudio(QMainWindow):
 
     def on_symmetry_changed(self, checked):
         self.log(f"Symmetrical: {'yes' if checked else 'no'}")
+        self._update_handle_controls()
         if self.frame is not None:
             QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
@@ -537,6 +629,8 @@ class PotteryStudio(QMainWindow):
     def on_axis_clicked(self, button):
         self.axis_choice = next(mode for mode, rb in self.rb_axis.items() if rb is button)
         self.log(f"Symmetry axis: {button.text()}")
+        self._reset_handle(reason="the symmetry axis changed")
+        self._reset_texture(reason="the symmetry axis changed")
         self.update_profile()
 
     # ------------------------------------------------------------------ Picking
@@ -619,6 +713,9 @@ class PotteryStudio(QMainWindow):
     # ------------------------------------------------------------------ Alignment
     def update_alignment(self, reset_camera=False):
         """Recomputes the alignment from the effective plane and redraws everything."""
+        # The handle lasso and section line are stored relative to the old slicing frame
+        self._reset_handle(reason="the planes or the alignment changed")
+        self._reset_texture(reason="the planes or the alignment changed")
         plane = self.effective_alignment_plane()
         self.align_R = self.align_center = None
         self.aligned_points = None
@@ -704,6 +801,29 @@ class PotteryStudio(QMainWindow):
             rb.setEnabled(mode in available)
             rb.setChecked(mode == effective)
         self.axis_group.setExclusive(True)
+
+        self._update_handle_controls()
+
+    def _update_handle_controls(self):
+        has_profile = self.frame is not None and self.picking_target is None
+        has_handle = self.handle_outline_uv is not None
+        self.grp_handle.setEnabled(has_profile)
+        self.grp_noise.setEnabled(has_profile)
+        self.btn_lasso_handle.setChecked(self.interaction == 'handle')
+        self.btn_lasso_noise.setChecked(self.interaction == 'noise')
+        self.btn_section.setChecked(self.interaction == 'section')
+        self.btn_clear_handle.setEnabled(self.handle_lasso_uv is not None)
+        self.btn_handle_left.setEnabled(has_handle and self.chk_symmetrical.isChecked())
+        self.btn_handle_left.setChecked(self.handle_on_left and self.btn_handle_left.isEnabled())
+        self.btn_handle_left.setText("Remove Handle from Left Side" if self.btn_handle_left.isChecked()
+                                     else "Add Handle to Left Side")
+        self.btn_section.setEnabled(has_handle)
+        removed = 0 if self.keep_mask is None else int(np.sum(~self.keep_mask))
+        self.btn_restore.setEnabled(removed > 0)
+        self.btn_restore.setText(f"Restore Removed Points ({removed:,})" if removed else "Restore Removed Points")
+        self.grp_finish.setEnabled(has_profile)
+        self.btn_texture.setChecked(self.interaction == 'texture')
+        self.btn_undo_texture.setEnabled(bool(self.texture_lines_uv))
 
     # ------------------------------------------------------------------ 3D view
     def redraw_3d(self, reset_camera=False):
@@ -820,7 +940,10 @@ class PotteryStudio(QMainWindow):
                 axis_pt, axis_dir = pottery_processor.build_symmetry_axis(
                     self.axis_mode, self.rim_circle, self.base_circle)
                 self.frame = pottery_processor.slice_frame(axis_pt, axis_dir, self.spin_angle.value())
-                self.profile_uv = pottery_processor.extract_axis_profile(self.aligned_points, self.frame)
+                # The handle's own points never enter the cross-section (the section is taken
+                # at an angle without the handle; the handle is drawn from its own angle)
+                self.profile_uv = pottery_processor.extract_axis_profile(
+                    self.active_points(exclude_handle=True), self.frame)
                 # Inner wall fully scanned: use the scanned walls as they are (no synthetic inner wall)
                 self.solid_poly, self.diag, err = pottery_processor.run_6step_pipeline(
                     self.profile_uv, hull_ratio=self.spin_ratio.value(),
@@ -843,6 +966,8 @@ class PotteryStudio(QMainWindow):
             self.lbl_profile.setText("Set a plane to see the profile.")
 
         self.update_left_side()
+        self.update_handle()
+        self._update_handle_controls()
         self.dirty_views = {'scheme', 'step', 'grid'}
         self._render_dirty_views()
         if redraw_3d:
@@ -857,6 +982,267 @@ class PotteryStudio(QMainWindow):
                                    ('grid', 3, self.render_grid_view)):
             if key in self.dirty_views and current == index:
                 render()
+
+    def active_points(self, exclude_handle=False):
+        """Aligned points without the ones removed by "Lasso Clean Noise"
+        (and, if asked, without the lassoed handle's points)."""
+        mask = self.keep_mask
+        if exclude_handle and self.handle_mask3d is not None:
+            mask = (np.ones(len(self.aligned_points), dtype=bool) if mask is None else mask) & ~self.handle_mask3d
+        if mask is None or mask.all():
+            return self.aligned_points
+        return self.aligned_points[mask]
+
+    # ------------------------------------------------------------------ Handle
+    # Two angles: the handle is lassoed at its own angle (seen side-on); the cross-section is taken
+    # at a nearby angle where the handle is absent. Both slicing frames rotate around the same axis,
+    # so the handle's uv coordinates at its angle are exactly the handle rotated onto the section.
+    def _reset_handle(self, reason=None):
+        """Forgets the handle lasso, its angle, section line and left-side copy."""
+        if reason and self.handle_lasso_uv is not None:
+            self.log(f"Handle cleared because {reason}.")
+        self.handle_lasso_uv = None
+        self.handle_outline_uv = None
+        self.handle_angle = None
+        self.handle_frame = None
+        self.handle_mask3d = None
+        self.handle_free = None
+        self.handle_on_left = False
+        self.section_line_uv = None
+        self.handle_sec = None
+        self.lbl_handle.setText("")
+
+    def set_handle(self, lasso_uv):
+        """Marks the handle at the current angle and moves the section to the nearest angle without it."""
+        frame = self.frame
+        mask3d = pottery_processor.lasso_point_mask(self.aligned_points, frame, lasso_uv, side='right')
+        if self.keep_mask is not None:
+            mask3d &= self.keep_mask
+        outline = pottery_processor.handle_outline(self.aligned_points[mask3d], frame, lasso_uv) \
+            if mask3d.sum() >= 4 else None
+        if outline is None:
+            self.lbl_handle.setText("⚠ No handle points inside the lasso – lasso the handle on the right side.")
+            return
+        self.handle_lasso_uv = np.asarray(lasso_uv, dtype=float)
+        self.handle_outline_uv = outline
+        self.handle_angle = self.spin_angle.value()
+        self.handle_frame = frame
+        self.handle_mask3d = mask3d
+        self.section_line_uv = None
+        self.handle_sec = None
+        self.handle_free = pottery_processor.handle_free_angle(
+            self.aligned_points[mask3d], frame['origin'], frame['a'], self.handle_angle)
+        self.log(f"Handle marked at {self.handle_angle}° ({int(mask3d.sum()):,} points).")
+        if self.chk_two_angles.isChecked():
+            self._set_angle_quietly(self.handle_free)
+            self.log(f"Section moved to {self.handle_free}°, the nearest angle without the handle.")
+        self.update_profile()
+
+    def _set_angle_quietly(self, angle):
+        """Sets the Angle without triggering the delayed profile update (the caller updates)."""
+        self.spin_angle.blockSignals(True)
+        self.spin_angle.setValue(int(angle) % 360)
+        self.spin_angle.blockSignals(False)
+
+    def on_two_angles_changed(self, checked):
+        self.log(f"Section at a nearby angle: {'yes (two angles)' if checked else 'no (one angle)'}")
+        if self.handle_lasso_uv is None:
+            return
+        # Move between the handle angle and the nearest angle without the handle
+        self._set_angle_quietly(self.handle_free if checked else self.handle_angle)
+        self.update_profile()
+
+    def update_handle(self):
+        """Status of the handle for the current section angle."""
+        if self.frame is None or self.handle_lasso_uv is None:
+            return
+        # Does the current section still cut through the handle?
+        pts = self.aligned_points[self.handle_mask3d]
+        uv, w = pottery_processor.points_to_uv(pts, self.frame)
+        cut = int(np.sum((np.abs(w) < 2.0) & (uv[:, 0] >= 0)))
+        delta = (self.spin_angle.value() - self.handle_angle + 180) % 360 - 180
+        if delta == 0:
+            lines = [f"Handle and section at {self.handle_angle}°"]
+        else:
+            lines = [f"Handle at {self.handle_angle}° · section at {self.spin_angle.value()}° ({delta:+d}°)"]
+        # In the one-angle method the section is at the handle on purpose
+        if cut > 20 and self.chk_two_angles.isChecked():
+            lines.append("⚠ The section cuts through the handle – move the Angle a little further, "
+                         "keeping it close to the handle.")
+        if self.section_line_uv is not None and self.handle_sec is None:
+            lines.append("⚠ The section line does not cross the handle – draw it again.")
+        elif self.handle_sec is not None:
+            b = self.handle_sec['polygon'].bounds
+            lines.append(f"Handle section: {b[2] - b[0]:.1f} × {b[3] - b[1]:.1f} mm")
+        else:
+            lines.append("Draw the section line across the handle.")
+        self.lbl_handle.setText("\n".join(lines))
+
+    # ------------------------------------------------------------------ Texture lines & saving
+    def _reset_texture(self, reason=None):
+        if reason and self.texture_lines_uv:
+            self.log(f"Texture lines cleared because {reason}.")
+        self.texture_lines_uv = []
+
+    def undo_texture_line(self):
+        if self.texture_lines_uv:
+            self.texture_lines_uv.pop()
+        self._update_handle_controls()
+        self.dirty_views.add('scheme')
+        self._render_dirty_views()
+
+    def save_scheme_image(self):
+        """Saves the Scheme as it looks (without helper markings) as PNG or PDF at 300 dpi.
+        Default name: the STL file name + '_scheme', in the STL's folder."""
+        if self.frame is None:
+            return
+        base = os.path.splitext(os.path.basename(self.stl_file_path))[0] or "pottery"
+        default = os.path.join(os.path.dirname(self.stl_file_path), f"{base}_scheme.png")
+        path, chosen = QFileDialog.getSaveFileName(self, "Save Scheme Image", default,
+                                                   "PNG Image (*.png);;PDF Document (*.pdf)")
+        if not path:
+            return
+        if not os.path.splitext(path)[1]:
+            path += ".pdf" if "pdf" in chosen.lower() else ".png"
+        self.set_interaction(None)
+        self._exporting = True
+        try:
+            self.render_scheme()
+            self.fig_scheme.savefig(path, dpi=300, bbox_inches='tight', facecolor='white')
+            self.log(f"Scheme saved: {path}")
+            QMessageBox.information(self, "Save Scheme Image", f"Scheme saved to:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Save Scheme Image", f"Could not save the image:\n{e}")
+        finally:
+            self._exporting = False
+            self.render_scheme()
+
+    def clear_handle(self):
+        self.set_interaction(None)
+        self._reset_handle()
+        self.log("Handle cleared.")
+        self.update_profile()
+
+    def toggle_handle_left(self):
+        self.handle_on_left = self.btn_handle_left.isChecked()
+        self._update_handle_controls()
+        self.dirty_views.add('scheme')
+        self._render_dirty_views()
+
+    def restore_points(self):
+        if self.keep_mask is not None:
+            self.log(f"Restored {int(np.sum(~self.keep_mask)):,} removed points.")
+            self.keep_mask[:] = True
+        self.update_profile()
+
+    # ------------------------------------------------------------------ Drawing interactions
+    def set_interaction(self, mode):
+        """Starts/stops a drawing tool on the 2D views: 'handle' / 'noise' lasso, 'section' line."""
+        if mode is not None and mode == self.interaction:
+            mode = None
+        self.interaction = mode
+        self._line_start = None
+        if mode in ('section', 'texture'):
+            self.tabs.setCurrentIndex(1)
+        elif mode is not None and self.tabs.currentIndex() not in (1, 2):
+            self.tabs.setCurrentIndex(1)
+        self._attach_selector('scheme')
+        self._attach_selector('step')
+        self._update_handle_controls()
+
+    def _attach_selector(self, which):
+        """(Re)creates the lasso on one canvas; needed after every ax.clear()."""
+        old = self.selectors.pop(which, None)
+        if old is not None:
+            try:
+                old.disconnect_events()
+            except Exception:
+                pass
+        if self.interaction not in ('handle', 'noise'):
+            return
+        ax = self.ax_scheme if which == 'scheme' else self.ax_step
+        color = '#d9534f' if self.interaction == 'handle' else '#f0ad4e'
+        self.selectors[which] = LassoSelector(
+            ax, lambda verts, w=which: self.on_lasso(verts, w), props={'color': color, 'linewidth': 2})
+
+    def on_lasso(self, verts, which):
+        if self.frame is None or len(verts) < 3:
+            return
+        verts = np.asarray(verts, dtype=float)
+        # The scheme is in drawing coordinates, the Step Inspector in uv
+        lasso_uv = pottery_processor.drawing_to_uv(verts, self.frame) if which == 'scheme' else verts
+        if self.interaction == 'handle':
+            if np.all(lasso_uv[:, 0] < 0):
+                self.lbl_handle.setText("⚠ Lasso the handle on the right side of the scheme.")
+                return
+            if self.handle_lasso_uv is not None:
+                # A new lasso replaces the handle: forget the old one first so its points
+                # are back in the slice at the current angle
+                self._reset_handle()
+                self.update_profile()
+            self.set_interaction(None)
+            self.set_handle(lasso_uv)
+        elif self.interaction == 'noise':
+            # Right side: points of the profile slice; left side (not symmetrical): the real left half
+            remove = pottery_processor.lasso_point_mask(self.aligned_points, self.frame, lasso_uv,
+                                                        side='right', slab=2.0)
+            if not self.chk_symmetrical.isChecked():
+                remove |= pottery_processor.lasso_point_mask(self.aligned_points, self.frame, lasso_uv, side='left')
+            remove &= self.keep_mask
+            self.keep_mask &= ~remove
+            self.log(f"Clean noise: removed {int(np.sum(remove)):,} points.")
+            self.update_profile()
+
+    def on_scheme_press(self, event):
+        """Click-drag straight lines on the Scheme: the handle section line or texture lines."""
+        if self.interaction not in ('section', 'texture') or event.inaxes is not self.ax_scheme \
+                or event.button != 1:
+            return
+        if self.canvas_scheme.widgetlock.locked():
+            return   # the toolbar's zoom/pan is active
+        self._line_start = (event.xdata, event.ydata)
+        style = 'r-' if self.interaction == 'section' else 'b--'
+        self._temp_line, = self.ax_scheme.plot([event.xdata] * 2, [event.ydata] * 2, style, lw=2)
+        self.canvas_scheme.draw_idle()
+
+    def on_scheme_motion(self, event):
+        if self._line_start is None or event.inaxes is not self.ax_scheme or self._temp_line is None:
+            return
+        self._temp_line.set_data([self._line_start[0], event.xdata], [self._line_start[1], event.ydata])
+        self.canvas_scheme.draw_idle()
+
+    def on_scheme_release(self, event):
+        if self._line_start is None or self.interaction not in ('section', 'texture'):
+            return
+        end = (event.xdata, event.ydata) if event.inaxes is self.ax_scheme else None
+        start, self._line_start = self._line_start, None
+        self._temp_line = None
+        if end is None or np.hypot(end[0] - start[0], end[1] - start[1]) < 1.0:
+            self.render_scheme()
+            return
+        if self.interaction == 'texture':
+            # Stored in uv so the lines stay on the vessel if the drawing's tilt changes;
+            # the tool stays on for more lines until its button is clicked again
+            self.texture_lines_uv.append(pottery_processor.drawing_to_uv([start, end], self.frame))
+            self._update_handle_controls()
+            self.render_scheme()
+            return
+        # uv is shared by the section frame and the handle frame (same axis), so the line drawn on
+        # the rotated handle cuts the real handle at its own angle
+        self.section_line_uv = pottery_processor.drawing_to_uv([start, end], self.frame)
+        self.handle_sec = None
+        try:
+            self.handle_sec = pottery_processor.handle_section(
+                self.active_points(), self.handle_frame, self.handle_lasso_uv, self.section_line_uv)
+        except Exception as e:
+            self.log(f"Handle section error: {e}")
+        self.log("Handle section line drawn." if self.handle_sec is not None
+                 else "Handle section line does not cross the handle.")
+        self.set_interaction(None)
+        self.update_handle()
+        self._update_handle_controls()
+        self.dirty_views.add('scheme')
+        self._render_dirty_views()
 
     # ------------------------------------------------------------------ Left side
     def rim_points_uv(self):
@@ -889,7 +1275,7 @@ class PotteryStudio(QMainWindow):
             return
         try:
             rim_v = pottery_processor.rim_line_v(*self.rim_points_uv())
-            self.left_lines_uv = pottery_processor.half_view_outline(self.aligned_points, self.frame, rim_v=rim_v)
+            self.left_lines_uv = pottery_processor.half_view_outline(self.active_points(), self.frame, rim_v=rim_v)
         except Exception as e:
             self.log(f"Left side error: {e}")
 
@@ -917,6 +1303,10 @@ class PotteryStudio(QMainWindow):
             self.canvas_scheme.draw()
             return
         fr = self.frame
+
+        # Right side: handle in external view (outline); drawn first so the section covers its roots
+        if self.handle_outline_uv is not None:
+            self._plot_outline(ax, self.handle_outline_uv, fr)
 
         # Right side: filled cross-section
         polys = _polygons(self.solid_poly)
@@ -948,8 +1338,92 @@ class PotteryStudio(QMainWindow):
         axis_seg = pottery_processor.uv_to_drawing([[0, v_bottom], [0, v_top]], fr)
         ax.plot(axis_seg[:, 0], axis_seg[:, 1], 'k-.', lw=1)
 
+        # Handle copy on the left side (symmetrical vessels)
+        if self.handle_outline_uv is not None and self.handle_on_left and self.chk_symmetrical.isChecked():
+            self._plot_outline(ax, pottery_processor.mirror_uv(self.handle_outline_uv), fr)
+
+        self._draw_handle_section(ax, fr)
+
+        # Texture / decoration lines
+        for line in self.texture_lines_uv:
+            d = pottery_processor.uv_to_drawing(line, fr)
+            ax.plot(d[:, 0], d[:, 1], 'k-', lw=1.2)
+
+        # While the tools are active, show what the user is working on (never in the saved image)
+        if not self._exporting and self.handle_lasso_uv is not None and self.interaction is None \
+                and self.handle_outline_uv is None:
+            lasso = pottery_processor.uv_to_drawing(np.vstack([self.handle_lasso_uv, self.handle_lasso_uv[:1]]), fr)
+            ax.plot(lasso[:, 0], lasso[:, 1], 'r--', lw=1)
+
+        # Extent of the drawing so far (before the labels)
+        ax.relim()
+        x0, y0, x1, y1 = ax.dataLim.x0, ax.dataLim.y0, ax.dataLim.x1, ax.dataLim.y1
+        height = max(y1 - y0, 1.0)
+
+        # Rim diameter (only when the rim was set with 3 points)
+        text_top = y1
+        if self.rim_circle is not None and rim_left is not None:
+            seg = pottery_processor.uv_to_drawing([rim_left, rim_right], fr)
+            ty = seg[:, 1].max() + height * 0.02
+            ax.text(seg[1, 0], ty, f"Rim Diameter: {self.rim_circle[1] * 2 / 10:.1f} cm",
+                    ha='right', va='bottom', fontsize=10, color='black')
+            text_top = max(text_top, ty + height * 0.05)
+
+        # 10 cm scale bar (alternating black/white centimetres) under the vessel, centred on the axis
+        bar_w = 100.0
+        bar_h = max(height * 0.015, 1.0)
+        bar_x = axis_seg[0, 0] - bar_w / 2
+        bar_y = y0 - height * 0.08
+        for i in range(10):
+            ax.add_patch(patches.Rectangle((bar_x + i * 10, bar_y), 10, bar_h,
+                                           facecolor='k' if i % 2 == 0 else 'w', edgecolor='k', linewidth=0.8))
+        ax.text(bar_x, bar_y - bar_h * 1.2, "0", ha='center', va='top', fontsize=10)
+        ax.text(bar_x + bar_w, bar_y - bar_h * 1.2, "10 cm", ha='center', va='top', fontsize=10)
+
+        # Room for the labels (text is not part of the automatic limits)
+        margin = height * 0.04
+        ax.set_xlim(min(x0, bar_x) - margin, max(x1, bar_x + bar_w) + margin)
+        ax.set_ylim(bar_y - bar_h * 1.2 - height * 0.06, text_top + margin)
         ax.set_aspect('equal')
         self.canvas_scheme.draw()
+        self._attach_selector('scheme')
+
+    @staticmethod
+    def _plot_outline(ax, poly_uv, fr, lw=1.2):
+        d = pottery_processor.geometry_uv_to_drawing(poly_uv, fr)
+        for ring in [d.exterior, *d.interiors]:
+            ax.plot(*ring.xy, 'k-', lw=lw)
+
+    def _draw_handle_section(self, ax, fr):
+        """Filled handle section above the handle, a dashed leader to the section line,
+        and short marks where the line crosses the handle."""
+        if self.section_line_uv is None:
+            return
+        line_d = pottery_processor.uv_to_drawing(self.section_line_uv, fr)
+        if self.handle_sec is None:
+            if not self._exporting:
+                ax.plot(line_d[:, 0], line_d[:, 1], 'r:', lw=1)   # invalid line: show it faintly
+            return
+        # Section axes in the drawing: t along the drawn line, s perpendicular to it
+        t_dir = line_d[1] - line_d[0]
+        t_dir /= np.linalg.norm(t_dir)
+        s_dir = np.array([-t_dir[1], t_dir[0]])
+        poly = self.handle_sec['polygon']
+        sec = np.array(poly.exterior.coords)
+        sec_d = np.outer(sec[:, 0], t_dir) + np.outer(sec[:, 1], s_dir)
+        mid = line_d.mean(axis=0)
+        # Above the handle: its top (drawing y) plus a gap
+        handle_d = pottery_processor.geometry_uv_to_drawing(self.handle_outline_uv, fr)
+        top = handle_d.bounds[3]
+        gap = max(8.0, 0.6 * np.ptp(sec_d[:, 1]))
+        center = np.array([mid[0], top + gap + (sec_d[:, 1].max() - sec_d[:, 1].min()) / 2])
+        sec_d = sec_d - (sec_d.max(axis=0) + sec_d.min(axis=0)) / 2 + center
+        ax.fill(sec_d[:, 0], sec_d[:, 1], color='black')
+        ax.plot([mid[0], mid[0]], [mid[1], sec_d[:, 1].min()], 'k--', lw=0.6)
+        # Cut marks: the drawn line, limited to the handle's width
+        half = (poly.bounds[2] - poly.bounds[0]) / 2 + 2.0
+        marks = np.array([mid - t_dir * half, mid + t_dir * half])
+        ax.plot(marks[:, 0], marks[:, 1], 'k-', lw=0.8)
 
     def render_selected_step(self, *args):
         """Renders a single pipeline step in the Step Inspector (uv coordinates: axis at u = 0)."""
@@ -1047,9 +1521,15 @@ class PotteryStudio(QMainWindow):
         ax.set_ylabel("along axis (mm)")
         ax.set_aspect('equal')
         ax.grid(True, linestyle=':', alpha=0.6)
+        if step == 0 and self.handle_outline_uv is not None:
+            # The handle is not in this slice; show where it sits (rotated from its own angle)
+            for k, ring in enumerate([self.handle_outline_uv.exterior, *self.handle_outline_uv.interiors]):
+                ax.plot(*ring.xy, 'r-', lw=1,
+                        label=f'Handle (from {self.handle_angle}°)' if k == 0 else None)
         ax.legend(loc='best', fontsize=9)
         self.lbl_step_info.setText(info)
         self.canvas_step.draw()
+        self._attach_selector('step')
 
     def render_grid_view(self):
         """All 6 pipeline steps side by side."""

@@ -902,6 +902,58 @@ def half_view_outline(points, frame, rim_v=None, ratio=0.1, resolution=1.0):
     return lines
 
 
+def lasso_point_mask(points, frame, lasso_uv, side='right', slab=None):
+    """
+    Boolean mask of 3D points whose projection (uv) falls inside a lasso polygon.
+    side: 'right' (u >= 0), 'left' (u <= 0) or 'both'.
+    slab: if given, only points within this distance of the slicing plane (the profile slice).
+    """
+    uv, w = points_to_uv(points, frame)
+    mask = points_in_polygon(uv, lasso_uv)
+    if side == 'right':
+        mask &= uv[:, 0] >= 0
+    elif side == 'left':
+        mask &= uv[:, 0] <= 0
+    if slab is not None:
+        mask &= np.abs(w) < slab
+    return mask
+
+
+def handle_outline(points, frame, lasso_uv, ratio=0.1, resolution=1.0):
+    """
+    External view of a handle on the right side: outline (uv Polygon, holes kept) of the
+    right-half points whose projection falls inside the handle lasso. None if too few points.
+    """
+    mask = lasso_point_mask(points, frame, lasso_uv, side='right')
+    if np.sum(mask) < 4:
+        return None
+    uv, _ = points_to_uv(np.asarray(points)[mask], frame)
+    return outline_polygon(uv, ratio=ratio, resolution=resolution, allow_holes=True)
+
+
+def handle_free_angle(handle_points, axis_point, axis_dir, handle_angle, slab=2.0, margin=5.0):
+    """
+    Nearest profile angle (degrees, 0-359) whose slice misses the handle: the handle's angular
+    extent around the axis (widened by the slab half-width at each point's radius) plus a margin,
+    on whichever side of the handle is closer.
+    """
+    pts = np.asarray(handle_points, dtype=float)
+    if len(pts) == 0:
+        return int(round(handle_angle)) % 360
+    fr0 = slice_frame(axis_point, axis_dir, 0.0)
+    rel = pts - fr0['origin']
+    x = np.dot(rel, fr0['e'])
+    y = np.dot(rel, np.cross(fr0['a'], fr0['e']))
+    r = np.hypot(x, y)
+    keep = r > 1e-6
+    offset = (np.degrees(np.arctan2(y[keep], x[keep])) - handle_angle + 180.0) % 360.0 - 180.0
+    half_width = np.degrees(np.arcsin(np.clip(slab / r[keep], 0.0, 1.0)))
+    after = handle_angle + np.max(offset + half_width) + margin
+    before = handle_angle + np.min(offset - half_width) - margin
+    best = after if abs(after - handle_angle) <= abs(before - handle_angle) else before
+    return int(round(best)) % 360
+
+
 def points_in_polygon(points_2d, polygon_vertices):
     """Boolean mask of the Nx2 points that lie inside the polygon (e.g. a lasso)."""
     pts = np.asarray(points_2d, dtype=float)
