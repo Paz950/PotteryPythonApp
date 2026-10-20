@@ -10,9 +10,18 @@ This is a PyQt5-based desktop application for 3D pottery sherd analysis. It load
 - **matplotlib**: 2D profile rendering and plotting (including Lasso).
 - **numpy / scipy**: Math operations, least squares circle fitting, point cloud manipulations.
 
+## Project Layout (since 2026-10-19)
+- `studio/` – **Pottery Studio**, the current program: `pottery_studio.py` + `RunStudio.bat`.
+- `core/` – `pottery_processor.py`, the shared calculations used by every version (studio and legacy).
+- `beta_amit/` – Amit's beta: `pottery_studio_beta.py` + `RunStudioBeta.bat` + a **frozen copy** of `pottery_studio.py` / `pottery_processor.py` (the code inside `PotteryStudioBetaAmit.exe`). Do not update the frozen copy unless the user asks for a new beta.
+- `legacy/` – the old programs `main.py`, `profile_test.py`, `profile_test2.py` with their `.bat` launchers (the launchers add `..\core` to `PYTHONPATH`).
+- `docs/` – `studio_plan.md`, `licensing_plan.md`, `handles_plan.md`.
+- `media/` – images and videos (git-ignored, not uploaded).
+- Each `.bat` sits in its version's folder and starts its script by full path, so it works from any working directory (also drag-and-drop of an STL).
+
 ## Code Architecture
-- `main.py`: Contains the `PotteryApp` class. Handles all UI layout, Qt signals, styling, and plotting (both 3D and 2D).
-- `pottery_processor.py`: Contains pure mathematical and algorithmic logic for alignment (`align_by_3_points`), layer extraction, circle fitting (`fit_circle_2d`), and profile extraction (`extract_profile`).
+- `legacy/main.py`: Contains the `PotteryApp` class. Handles all UI layout, Qt signals, styling, and plotting (both 3D and 2D).
+- `core/pottery_processor.py`: Contains pure mathematical and algorithmic logic for alignment (`align_by_3_points`), layer extraction, circle fitting (`fit_circle_2d`), and profile extraction (`extract_profile`), plus the Pottery Studio geometry.
 
 ## Important Rules for Future Edits
 1. **Separation of Concerns**: UI logic stays in `main.py`. Math/Algorithm logic stays in `pottery_processor.py`. Do NOT put heavy math inside the `PotteryApp` class.
@@ -26,4 +35,4 @@ This is a PyQt5-based desktop application for 3D pottery sherd analysis. It load
 9. **Whole Vessel Mode vs Sherd Mode**: The app supports two drawing modes. `Sherd` mode relies on Delaunay Triangulation for standard double-wall profiles. `Whole Vessel` mode applies algorithmic inner-wall completion using `shapely` offsetting, because full vessels are often scanned only on the exterior and the top inner rim.
 10. **Geometric Processing (Shapely)**: When drawing facades (left side) and handle cross-sections, the application uses `shapely.concave_hull` on a downsampled 2D point cloud (1mm resolution) to generate accurate contours with inner voids (like handle holes) without performance degradation.
 11. **Rim Thickness Calculation**: For Whole Vessels, inner thickness is estimated dynamically using PCA/Linear Regression on the top 1.5 cm of the rim to measure true perpendicular thickness, which is then used to generate a flat inner base.
-12. **Pottery Studio (new GUI in progress)**: `pottery_studio.py` (launched by `RunStudio.bat`) is a new full-process GUI planned in `studio_plan.md`. Do not modify `main.py` or `profile_test2.py` while building it. Keep `studio_plan.md` up to date (status table and decisions log) whenever a stage is completed or a decision changes.
+12. **Pottery Studio**: `studio/pottery_studio.py` (launched by `studio/RunStudio.bat`) is the full-process GUI planned in `docs/studio_plan.md`. Do not modify `legacy/main.py` or `legacy/profile_test2.py`. Keep `docs/studio_plan.md` up to date (status table and decisions log) whenever a stage is completed or a decision changes.

@@ -17,7 +17,7 @@ After each stage: stop and let the user test before continuing.
 ---
 
 ## 1. General approach
-- New files: `pottery_studio.py` (the GUI) and `RunStudio.bat` (launcher).
+- New files: `pottery_studio.py` (the GUI) and `RunStudio.bat` (launcher). Since 2026-10-19 they live in `studio/`; the calculations in `core/` (see §21).
 - `main.py` and `profile_test2.py` are **not modified** and must keep working.
 - All math lives in `pottery_processor.py` (per `.agents/AGENTS.md`). The GUI file contains only UI, event handling and drawing.
   - Move `run_6step_pipeline_v2` from `profile_test2.py` into `pottery_processor.py` (as a copy; `profile_test2.py` stays unchanged).
@@ -142,6 +142,8 @@ Folder: `C:\Users\lenovo\Desktop\AmitDagan\models\` – the user approved loadin
 | 16 | Texture lines | Straight lines only, with **Undo Last Line** |
 | 17 | Text in the scheme | Only the rim diameter |
 | 18 | Saved file name | STL file name + `_scheme` (e.g. `bilbil23_scheme.png`), default folder = the STL's folder |
+| 19 | Startup check | Pottery Studio (like the beta) starts only if `C:\p` exists, else "ERROR - call Paz Burstein 0523423548 for technical support" (2026-10-20) |
+| 20 | `.exe` | `MainPottery\PotteryStudio\PotteryStudio.exe`; GitHub gets the code only (2026-10-20) |
 | 11 | Button labels & controls | Exactly as specified in §2 (e.g. "Load STL", "Set Rim Plane", "Set Base Plane", radio buttons, "Add Texture Lines", "Save Scheme Image") – **not** the numbered labels of the old GUIs ("1. Load STL", "2. Align (Pick 3 Points on Base/Rim)", ...) |
 
 ## 9. Findings from stage 1 (2026-09-28)
@@ -239,3 +241,38 @@ Folder: `C:\Users\lenovo\Desktop\AmitDagan\models\` – the user approved loadin
 - **Save Scheme Image**: dialog with default `<STL name>_scheme.png` in the STL's folder; PNG or PDF (extension added from the chosen filter if typed without one); 300 dpi, `bbox_inches='tight'`, white background; saves the scheme as drawn, without helper markings (faint red invalid section line, handle lasso preview); any active drawing tool is switched off first.
 - Tested on bilbil23 (Whole, centers axis, two angles, handle + section + left copy, 3 texture lines → undo → 2): PNG 823 × 1648 px at 300 dpi and PDF saved; default name `bilbil23_scheme.png` in the models folder; scale bar consistent with the vessel height (27.9 cm ≈ 2.8 bar lengths).
 - Note: the saved image is not at a fixed print scale (e.g. 1:1); the scale bar gives the scale. A fixed-scale export could be added if needed.
+
+## 19. Usage note – vessels scanned inside (2026-10-16)
+- `ImageToStl.com_scan.stl` is a **chalice** (bowl on a solid stem and a hollow, open foot), scanned inside and out. With Whole Vessel's default (Inner Wall Fully Scanned **off**) the 6-step completion draws a wrong base (it expects a base reaching the axis; here the "bottom center" was found ~30 mm from the axis).
+- Fix = check **Inner Wall Fully Scanned** → correct section at all tested angles (bowl, floor, solid stem to the axis, hollow foot). No code change.
+- Idea (not done): detect a scanned inner wall automatically and suggest the checkbox, or warn when the completion clearly does not fit the shape.
+
+## 20. "Inner Wall Fully Scanned" – filled section from the mesh cut (2026-10-18)
+- Problem (user, chalice `ImageToStl.com_scan.stl`): with the box checked the right side was not black. The concave hull (ratio 0.03) of the slice points collapsed into thin strips along the two surfaces (area 355 mm² instead of ~2,100 mm²): the scan is a shell (points only on the surfaces), and on a large vessel the hull's relative threshold was smaller than the 6 mm wall.
+- New method `scanned_section()` / `run_scanned_profile()` (user's idea: close the shape with the axis line, then remove it):
+  1. cut the **mesh** with the slicing plane (exact section lines; no ±2 mm smearing), keep the right side (u ≥ 0);
+  2. add the **symmetry axis as a line** from the bottom up to the rim line – closes the right half where clay reaches the axis (solid stem/base);
+  3. draw everything on a 0.2 mm grid, close tiny scan gaps (2 px);
+  4. "paint the air" from the image border (open hollows – inside of a bowl, hollow foot – are reached through their openings); what the paint does not reach = clay = black;
+  5. remove the axis line where it crossed air; vectorize (contourpy + polygonize).
+- Used only when **Inner Wall Fully Scanned** is checked (sherds by default); Hull Ratio is disabled then. The completion pipeline (box unchecked) is unchanged.
+- Noise removal and the handle are respected: triangles touching removed or handle vertices are left out of the cut (cached aligned mesh, `section_mesh()`).
+- Step Inspector Step 2 / Grid show the filled section ("Filled section (mesh cut)").
+- Results: chalice 2,101–2,375 mm² at 0°/150°/300° (was 355), solid stem to the axis, hollows white; sherd: the fill follows the true surface exactly (the old hull was ~1 mm too wide on each side because of the ±2 mm slab). A large unscanned hole in a wall may stay white (shows where the scan is missing).
+- Speed: section ~0.65 s on 1M vertices. Also `outline_polygon()` deduplication now uses an integer cell key instead of `np.unique(axis=0)` (same cells, 1.6 s → 0.2 s) → a full update on the chalice (non-symmetrical) went from ~4 s to ~2 s.
+- **Beta frozen:** `pottery_studio_beta.py` now runs the copy in `beta_amit/` (the code inside `PotteryStudioBetaAmit.exe`); this change is in the regular version only.
+
+## 21. Project folders (2026-10-19, user's request: one folder per version, nothing deleted)
+| Folder | Contents |
+|---|---|
+| `studio/` | `pottery_studio.py`, `RunStudio.bat` – the current Pottery Studio |
+| `core/` | `pottery_processor.py` – shared calculations (studio + legacy) |
+| `beta_amit/` | `pottery_studio_beta.py`, `RunStudioBeta.bat`, frozen copy of `pottery_studio.py` + `pottery_processor.py` (= the code in `PotteryStudioBetaAmit.exe`) |
+| `legacy/` | `main.py`, `profile_test.py`, `profile_test2.py` + `RunApp.bat`, `RunProfileTest.bat`, `RunProfileTest2.bat` |
+| `docs/` | `studio_plan.md`, `licensing_plan.md`, `handles_plan.md` |
+| `media/` | the `.png` images and `.mp4` videos (git-ignored) |
+| root | `requirements.txt`, `.gitignore`, `.agents/AGENTS.md` |
+- Files moved with `git mv` (history kept); nothing deleted.
+- `studio/pottery_studio.py` adds `../core` to `sys.path`; the beta adds its own folder (frozen copy); the legacy launchers set `PYTHONPATH=..\core` and `cd` to their folder – the legacy `.py` files were not changed.
+- Each launcher starts its script by full path (`%~dp0`) → works from any working directory (drag-and-drop of an STL). All 5 launchers tested: each program window opens.
+- `.gitignore`: `__pycache__/`, `*.pyc`, `media/`. (The one cache file already tracked in git, `__pycache__/pottery_processor.cpython-311.pyc`, was left as is – nothing removed.)

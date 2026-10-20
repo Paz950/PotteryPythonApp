@@ -64,7 +64,20 @@ The license server does **not** run on the developer's own PC. Options:
 - [ ] Licensing service vs. own server.
 - [ ] Packaging: PyInstaller vs. Nuitka, obfuscation yes/no.
 
-## 8. Implementation (after the decisions)
+## 8. Beta for Amit's test (2026-10-16) – implemented
+- `beta_amit/pottery_studio_beta.py` + `beta_amit/RunStudioBeta.bat`: the same Pottery Studio, running the frozen copy of the code in `beta_amit/` (since 2026-10-18), window title "Pottery Studio – Beta (Amit Test)".
+- Starts only if the folder **`C:\p`** exists; otherwise an error window: "ERROR - call Paz Burstein 0523423548 for technical support", then exit (code 1). The developer creates `C:\p` on Amit's PC when installing.
+- Since 2026-10-20 the regular Pottery Studio (`studio/pottery_studio.py`) has the **same `C:\p` check and message** (user's request); its `.exe` is `C:\Users\lenovo\Desktop\MainPottery\PotteryStudio\PotteryStudio.exe` (see §8b).
+- Packaged with PyInstaller (one folder, no console window) into `C:\Users\lenovo\Desktop\MainPottery\PotteryStudioBetaAmit\` (outside the git repo) → `PotteryStudioBetaAmit.exe` + `_internal\`. Copy the **whole folder** to Amit's PC.
+- Build notes: PySide6 is also installed on the developer PC → it must be excluded (`--exclude-module PySide6 PySide2 PyQt6 shiboken6`); PyInstaller refuses two Qt bindings. Other options used: `--onedir --windowed --collect-submodules vtkmodules --collect-data trimesh --hidden-import pyvistaqt pottery_studio pottery_processor`. To rebuild the beta from the new folders: run PyInstaller on `beta_amit/pottery_studio_beta.py` with `--paths beta_amit` (the frozen copy). The build takes ~10+ minutes.
+- This is a simple barrier only (anyone can create `C:\p`); the real licensing model is §4.
+
+## 8b. Pottery Studio `.exe` (2026-10-20)
+- `studio/pottery_studio.py` checks `C:\p` at startup (same message as the beta); window title "Pottery Studio".
+- Built with PyInstaller into `C:\Users\lenovo\Desktop\MainPottery\PotteryStudio\` (outside the git repo; ~1.2 GB; copy the whole folder): `--onedir --windowed --name PotteryStudio --paths core --hidden-import pottery_processor --hidden-import pyvistaqt --collect-submodules vtkmodules --collect-data trimesh --exclude-module PySide6 --exclude-module PySide2 --exclude-module PyQt6 --exclude-module shiboken6 studio/pottery_studio.py`.
+- The `.exe` is **not** uploaded to GitHub (too large for a repository; user decision: code only).
+
+## 9. Implementation (after the decisions)
 1. Machine fingerprint + license check module (separate from the GUI and from `pottery_processor.py`).
 2. Activation dialog in Pottery Studio (enter license key; shows status, days left offline, schemes left).
 3. Scheme counting in **Save Scheme Image**.
